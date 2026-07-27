@@ -1,0 +1,16 @@
+build/
+install/
+log/
+
+__pycache__/
+*.pyc
+*.egg-info/
+
+data/*.mcap
+data/*.db3
+data/*.yaml
+*.bag
+!data/.gitkeep
+
+.vscode/
+.DS_Store
