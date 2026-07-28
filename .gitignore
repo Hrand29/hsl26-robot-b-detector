@@ -6,10 +6,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-data/*.mcap
-data/*.db3
-data/*.yaml
-*.bag
+data/*
 !data/.gitkeep
 
 .vscode/
