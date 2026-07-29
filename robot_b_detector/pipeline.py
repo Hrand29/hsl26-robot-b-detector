@@ -207,3 +207,8 @@ def select_robot_candidate(clusters, points, expected_diameter=ROBOT_BASE_DIAMET
     if return_debug:
         return best, debug_info
     return best
+
+
+def estimate_xy(cluster):
+    """Центроид кластера в плоскости XY - оценка позиции робота Б."""
+    return cluster[:, 0].mean(), cluster[:, 1].mean()

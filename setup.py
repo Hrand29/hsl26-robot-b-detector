@@ -13,7 +13,7 @@ setup(
         ('share/' + package_name + '/launch', ['launch/detector.launch.py']),
         ('share/' + package_name + '/rviz', ['rviz/livox_view.rviz']),
     ],
-    install_requires=['setuptools', 'numpy', 'scipy', 'mcap-ros2-support'],
+    install_requires=['setuptools', 'numpy', 'scipy'],
     zip_safe=True,
     maintainer='Roman Komarov',
     maintainer_email='komarov.iphone@gmail.com',
