@@ -1,14 +1,15 @@
-"""ROS2-нода: подписывается на /livox/lidar и публикует debug-топики по мере
-готовности стадий пайплайна.
+"""ROS2-нода: подписывается на /livox/lidar и публикует debug-топики.
 
-Stage 1: перевод облака в base_link, удаление пола -> /debug/floor_removed
+Stage 1 (удаление пола): плоскость пересчитывается не на каждом кадре, а раз
+в RECALIBRATION_PERIOD_SEC по накопленным точкам - иначе разные RANSAC-фиты
+вместе с Decay Time в RViz визуально "отращивают" пол обратно.
 
-Плоскость пола пересчитывается не на каждом кадре: RANSAC даёт немного разную
-плоскость каждый раз, а Decay Time в RViz копит кадры за пару секунд — из-за
-этого пол визуально "отрастает обратно". Вместо этого калибруемся раз в
-RECALIBRATION_PERIOD_SEC по накопленным за интервал точкам: стабильно внутри
-интервала и подстраивается, если сенсор сдвинется.
+Stage 2 (кандидат-робот): кластеризация по скользящему окну
+ACCUMULATION_WINDOW_SEC, не по одному кадру - у Livox неповторяющийся
+паттерн сканирования, один кадр слишком разреженный на дальних дистанциях.
 """
+
+import collections
 
 import numpy as np
 import rclpy
@@ -24,6 +25,7 @@ from robot_b_detector import pipeline
 
 TARGET_FRAME = 'base_link'
 RECALIBRATION_PERIOD_SEC = 3.0
+ACCUMULATION_WINDOW_SEC = 1.5
 
 
 class DetectorNode(Node):
@@ -41,10 +43,12 @@ class DetectorNode(Node):
         )
         self.create_subscription(PointCloud2, '/livox/lidar', self.on_cloud, lidar_qos)
         self.floor_removed_pub = self.create_publisher(PointCloud2, '/debug/floor_removed', 10)
+        self.candidate_pub = self.create_publisher(PointCloud2, '/debug/candidate_cluster', 10)
 
         self._ground_plane = None
         self._calibration_buffer = []
         self._last_calibration = self.get_clock().now()
+        self._accum_buffer = collections.deque()  # [(t_sec, points), ...]
 
     def on_cloud(self, msg: PointCloud2):
         try:
@@ -79,6 +83,34 @@ class DetectorNode(Node):
         remaining = pipeline.remove_ground(points, self._ground_plane)
         out = point_cloud2.create_cloud_xyz32(cloud_base.header, remaining)
         self.floor_removed_pub.publish(out)
+
+        now_sec = now.nanoseconds / 1e9
+        self._accum_buffer.append((now_sec, remaining))
+        while now_sec - self._accum_buffer[0][0] > ACCUMULATION_WINDOW_SEC:
+            self._accum_buffer.popleft()
+
+        accumulated = np.concatenate([p for _, p in self._accum_buffer])
+        down = pipeline.voxel_downsample(accumulated)
+        clusters = pipeline.cluster_points(down)
+        candidate, debug_info = pipeline.select_robot_candidate(
+            clusters, accumulated, return_debug=True)
+
+        if candidate is not None:
+            cx, cy = candidate[:, 0].mean(), candidate[:, 1].mean()
+            winner = f'ПОБЕДИТЕЛЬ=({cx:.2f},{cy:.2f}) n={len(candidate)}'
+        else:
+            winner = 'ПОБЕДИТЕЛЬ=нет'
+        others = [
+            f"({c['center'][0]:.2f},{c['center'][1]:.2f}) n={c['n']} "
+            f"ratio={c['density_ratio']:.2f} ok={c['density_ok']}" for c in debug_info
+        ]
+        self.get_logger().info(
+            winner + ' | кандидаты: ' + ('; '.join(others) if others else 'нет'),
+            throttle_duration_sec=1.0)
+
+        if candidate is not None:
+            candidate_msg = point_cloud2.create_cloud_xyz32(cloud_base.header, candidate)
+            self.candidate_pub.publish(candidate_msg)
 
 
 def main(args=None):
