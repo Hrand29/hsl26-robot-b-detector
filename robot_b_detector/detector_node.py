@@ -34,6 +34,26 @@ TARGET_FRAME = 'base_link'
 RECALIBRATION_PERIOD_SEC = 3.0
 ACCUMULATION_WINDOW_SEC = 1.5
 MIN_CONFIDENT_POINTS = 50
+# кластеризация + RANSAC-окружность - самая дорогая часть конвейера, не
+# должна пересчитываться на каждый кадр лидара (8-30Гц). Скорость погони
+# ограничена, 5Гц позиции хватает с запасом - и держит CPU-бюджет узла
+# ограниченным независимо от частоты лидара, когда рядом крутится SLAM/Nav2
+DETECTION_PERIOD_SEC = 0.2
+# основание робота Б не выше max_height в select_robot_candidate (0.45) -
+# обрезаем раньше, до накопления в буфер, чтобы кластеризация не тратила
+# время на верхнюю часть стен/препятствий (высота 1м в лабиринте HSL26)
+CROP_MAX_HEIGHT = 0.5
+# лидар на своей же мачте видит и собственную платформу (mast.urdf.xacro:
+# 0.25x0.25м на z~0.29 - диагональ ~0.177м от base_link) - без фильтра эти
+# self-хиты (живой тест: плотный blob вплоть до 0.06м от начала координат)
+# засоряют density_above_count в select_robot_candidate, т.к. попадают в её
+# height_range=(0.2,0.45) и рядом с любым близким кандидатом дают ложное
+# "сплошная поверхность = не робот". Живой тест показал чистый разрыв между
+# self-хитами и целью (пусто на 0.06-0.22м) - 0.2м отсекает свою платформу
+# с запасом и не задевает цель даже на минимальной дистанции поимки по
+# регламенту (0.45м между центрами, ближняя точка цели радиусом 0.175м
+# оказалась бы на ~0.275м от base_link - ещё выше порога)
+SELF_FILTER_RADIUS = 0.2
 
 
 class DetectorNode(Node):
@@ -57,6 +77,7 @@ class DetectorNode(Node):
         self._ground_plane = None
         self._calibration_buffer = []
         self._last_calibration = self.get_clock().now()
+        self._last_detection = self.get_clock().now()
         self._accum_buffer = collections.deque()  # [(t_sec, points), ...]
 
     def on_cloud(self, msg: PointCloud2):
@@ -94,9 +115,19 @@ class DetectorNode(Node):
         self.floor_removed_pub.publish(out)
 
         now_sec = now.nanoseconds / 1e9
-        self._accum_buffer.append((now_sec, remaining))
+        # обрезка высоты + self-filter - только для буфера кластеризации,
+        # /debug/floor_removed выше публикует remaining целиком, без обрезки
+        cropped = remaining[remaining[:, 2] < CROP_MAX_HEIGHT]
+        radial = np.hypot(cropped[:, 0], cropped[:, 1])
+        cropped = cropped[radial > SELF_FILTER_RADIUS]
+        self._accum_buffer.append((now_sec, cropped))
         while now_sec - self._accum_buffer[0][0] > ACCUMULATION_WINDOW_SEC:
             self._accum_buffer.popleft()
+
+        elapsed_detection = (now - self._last_detection).nanoseconds / 1e9
+        if elapsed_detection < DETECTION_PERIOD_SEC:
+            return
+        self._last_detection = now
 
         accumulated = np.concatenate([p for _, p in self._accum_buffer])
         down = pipeline.voxel_downsample(accumulated)
